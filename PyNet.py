@@ -13,8 +13,7 @@ class Connection:
         self.receive_thread = None
         self.on_receive = None
         self.on_disconnected = None
-        self.message_separator = "\r\n"
-        self.message_queue=queue.Queue()
+        self.queue=queue.Queue()
 
     def start_receiving(self):
         self.receive_thread = Thread(target=self.receive)
@@ -28,14 +27,9 @@ class Connection:
                 if data is None or len(data) == 0:
                     self.connected = False
                 else:
-                    if self.message_separator in data:
-                        idx = data.index(self.message_separator)
-                        self.message_queue.put(self._message + data[0:idx])
-                        if callable(self.on_receive):
-                            self.on_receive(self)
-                        self._message = data[idx + len(self.message_separator):]
-                    else:
-                        self._message += data
+                    self.queue.put(data)
+                    if callable(self.on_receive):
+                        self.on_receive(self)
             except socket.timeout:
                 pass
 
@@ -50,12 +44,11 @@ class Connection:
         self.connected = False
 
 class Server:
-    def __init__(self, ip:str, port:int):
-        self._running = False
-        self._socket = None
-        self._connections = []
+    def __init__(self, ip:str, port:int , max_connections=2):
+        self.connections = []
         self.listen_thread = None
-        self._max_connections = 2
+        self.max_connections = max_connections
+        self._running = False
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._socket.bind((ip, port))
@@ -65,18 +58,18 @@ class Server:
         self.listen_thread.start()
 
     def on_client_connected(self, conn:Connection):
-        print("Connected from {}:{}. Active connections: {}".format(conn.ip, conn.port, len(self._connections)))
-        if len(self._connections) == self._max_connections:
+        print("Connected from {}:{}. Active connections: {}".format(conn.ip, conn.port, len(self.connections)))
+        if len(self.connections) == self.max_connections:
             print("Max connection number reached.")
 
     def on_client_disconnected(self, conn:Connection):
-        print("{}:{} disconnected. Active connections:{}".format(conn.ip, conn.port, len(self._connections)))
+        print("{}:{} disconnected. Active connections:{}".format(conn.ip, conn.port, len(self.connections)))
 
     def listen(self):
         print("Listening...")
         self._running = True
         while self._running:
-            if len(self._connections) < self._max_connections:
+            if len(self.connections) < self.max_connections:
                 try:
                     self._socket.settimeout(0.2)  # timeout for listening
                     self._socket.listen(1)
@@ -88,14 +81,14 @@ class Server:
 
     def stop(self):
         self._running = False
-        for c in self._connections:
+        for c in self.connections:
             c.disconnect()
         self.listen_thread.join()
         print("server stopped.")
 
     def client_connected(self, conn:Connection, ip:str, port:int):
         connection = Connection(conn, ip, port)
-        self._connections.append(connection)
+        self.connections.append(connection)
         connection.on_receive = self.on_receive
         connection.on_disconnected = self.client_disconnected
         connection.start_receiving()
@@ -103,18 +96,18 @@ class Server:
             self.on_client_connected(connection)
 
     def client_disconnected(self, conn:Connection):
-        self._connections.remove(conn)
+        self.connections.remove(conn)
         if callable(self.on_client_disconnected):
             self.on_client_disconnected(conn)
 
     def send(self, msg:str):
-        for conn in self._connections:
+        for conn in self.connections:
             conn.send(msg)
 
     def on_receive(self, connection:Connection):
-        msg = "From {}:{}: {}\r\n".format(connection.ip, connection.port,connection.message_queue.get())
+        msg = "From {}:{}: {}\r\n".format(connection.ip, connection.port, connection.queue.get())
         print(msg)
-        for conn in self._connections:
+        for conn in self.connections:
             if conn is not connection:
                 conn.send(msg)
 
@@ -172,7 +165,7 @@ class Client:
 if __name__ == '__main__':
     client = Client()
     client.connect("127.0.0.1", 10000)
-    client.on_receive = lambda conn: print(conn.message_queue.get())
+    client.on_receive = lambda conn: print(conn.queue.get())
     client.on_connected = lambda conn: print("Client Connected to {}:{}".format(conn.ip, conn.port))
     client.on_disconnected = lambda conn:print("Client disconnected")
     time.sleep(5)
@@ -184,5 +177,7 @@ if __name__ == '__main__':
             client.close()
             server.stop()
             break
+        elif command[0:2]=="C:":
+            client.send(command[2:])
         else:
-            server.send("From Server: " + command + "\r\n")
+            server.send("From Server: " + command)
